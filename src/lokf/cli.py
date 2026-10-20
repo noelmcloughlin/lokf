@@ -916,8 +916,9 @@ def registry_init(
 
 @registry_app.command("add")
 def registry_add(
-    bundle_dir: Path = typer.Argument(
-        ..., exists=True, file_okay=False, help="A local LOKF bundle directory."
+    source: str = typer.Argument(
+        ...,
+        help="A local LOKF bundle directory, a bundle zip, or the URL of one.",
     ),
     registry: Path = typer.Option(
         Path("lokf-registry.yaml"), "--registry", "-r", help="Manifest to append to."
@@ -925,26 +926,56 @@ def registry_add(
     source_base: Optional[str] = typer.Option(
         None,
         "--source-base",
-        help="URL prefix for source .md files (defaults to the bundle's file:// path).",
+        help="URL prefix for source .md files. Without it a directory is recorded "
+        "by its local path, and a zip has no source URL.",
+    ),
+    checksum: Optional[str] = typer.Option(
+        None,
+        "--checksum",
+        help="Expected sha256 of a zip (sha256:<hex> or bare hex); a mismatch is refused.",
+    ),
+    allow_foreign_ids: bool = typer.Option(
+        False,
+        "--allow-foreign-ids",
+        help="Index explicit ids that lie outside the bundle's base_iri instead of refusing.",
     ),
 ) -> None:
-    """Register a local bundle: derive its base_iri, VoID index, and id_index."""
-    from lokf.registry import entry_for_bundle, load_registry
+    """Register a bundle: derive its base_iri, VoID index, and id_index."""
+    from lokf.registry import entry_for_archive, entry_for_bundle, is_url, load_registry
 
     if not registry.exists():
         _err(f"{registry} not found — run `lokf registry init` first")
         raise typer.Exit(1)
+    local = Path(source)
+    if not is_url(source) and not local.exists():
+        _err(f"{source} not found")
+        raise typer.Exit(1)
+    if checksum and local.is_dir():
+        _err("--checksum applies to a zip, not a directory")
+        raise typer.Exit(1)
     reg = load_registry(registry)
     try:
-        entry = entry_for_bundle(bundle_dir, source_base=source_base)
+        if local.is_dir():
+            entry = entry_for_bundle(
+                local, source_base=source_base, allow_foreign_ids=allow_foreign_ids
+            )
+        else:
+            entry = entry_for_archive(
+                source,
+                source_base=source_base,
+                checksum=checksum,
+                allow_foreign_ids=allow_foreign_ids,
+            )
         reg.add(entry)
-    except ValueError as exc:
-        _err(f"cannot register {bundle_dir}: {exc}")
+    except (ValueError, OSError) as exc:
+        _err(f"cannot register {source}: {exc}")
         raise typer.Exit(1)
     reg.save()
+    foreign = sum(1 for iri in entry.id_index if not iri.startswith(entry.base_iri))
     typer.echo(
         f"registered {entry.base_iri} "
         f"({entry.void.get('triples', 0)} triples) in {registry}"
+        + (f"; indexed {foreign} explicit id(s) outside base_iri" if foreign else "")
     )
 
 

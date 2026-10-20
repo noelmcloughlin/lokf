@@ -21,6 +21,12 @@ with the 0.x caveat that a minor release may tighten validation.
 - `query_form` reads a query whose `PREFIX` or `BASE` shares its line, so a
   one-line ASK or CONSTRUCT is no longer run as a SELECT.
 
+- `lokf registry add` takes a bundle zip or its URL and records the archive and
+  its `checksum`; `path` is written only without `--source-base`.
+
+- Registration now refuses explicit ids outside `base_iri` unless
+  `--allow-foreign-ids` is given, and ids inside another member's namespace.
+
 - SHACL artifacts now match the authoring RDF projection, preserve separate
   Source/Citation shapes, and avoid false failures from inherited properties
   and fields sharing a predicate. Closed frontmatter checks remain in JSON Schema.

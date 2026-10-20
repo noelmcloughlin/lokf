@@ -8,14 +8,20 @@ from one bundle into another is pure string math: no network, no shared
 database. See SPEC §11.
 
 This module is the offline core (Phase 1): loading/saving the manifest,
-building an entry from a local bundle, and resolving an IRI to its owning
-bundle + Concept ID + source URL. Harvesting remote artifacts and traversing a
-federated store land in later phases.
+building an entry from a local bundle or a released bundle archive, and
+resolving an IRI to its owning bundle + Concept ID + source URL. Harvesting
+remote artifacts and traversing a federated store land in later phases.
 """
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import pathlib
+import re
+import shutil
+import tempfile
+import urllib.request
+import zipfile
 from collections import Counter
 from dataclasses import dataclass, field
 
@@ -26,6 +32,10 @@ import yaml
 VOCAB_NS = "https://w3id.org/lokf/"
 REGISTRY_VERSION = "0.1"
 DEFAULT_REGISTRY = "lokf-registry.yaml"
+#: Ceiling on a bundle archive's size, downloaded and unpacked, so a hostile
+#: zip or an endless response cannot fill the disk.
+MAX_ARCHIVE_BYTES = 1 << 30
+_CHECKSUM = re.compile(r"^(?:sha256:)?([0-9a-fA-F]{64})$")
 
 
 @dataclass
@@ -38,6 +48,7 @@ class RepoEntry:
     source_base: str = ""
     path: str | None = None
     distribution: dict = field(default_factory=dict)
+    checksum: str | None = None  # "sha256:<hex>" of the archive it was registered from
     void: dict = field(default_factory=dict)
     id_index: dict = field(default_factory=dict)  # explicit-id IRI -> Concept ID
     sensitivity: str | None = None
@@ -146,6 +157,25 @@ class Registry:
                     f"base_iri {b!r} nests with registered {e.base_iri!r}; "
                     "base_iris must not be prefixes of one another"
                 )
+        # An explicit id may lie outside its own base_iri (SPEC §11.3 rule 1),
+        # but never inside another member's namespace or the vocabulary's, in
+        # either order of registration: prefix routing would win and the index
+        # entry would never route, or it would claim a namespace it does not own.
+        for iri in entry.id_index:
+            if iri.startswith(VOCAB_NS):
+                raise ValueError(f"explicit id {iri} lies in the vocabulary namespace")
+            for e in self.repos:
+                if iri.startswith(e.base_iri):
+                    raise ValueError(
+                        f"explicit id {iri} lies in registered {e.base_iri!r}"
+                    )
+        for e in self.repos:
+            for iri in e.id_index:
+                if iri.startswith(b):
+                    raise ValueError(
+                        f"base_iri {b!r} captures explicit id {iri} "
+                        f"of registered {e.base_iri!r}"
+                    )
         self.repos.append(entry)
 
     def to_dict(self) -> dict:
@@ -217,14 +247,20 @@ def load_registry(path: str | pathlib.Path) -> Registry:
 def entry_for_bundle(
     bundle_dir: str | pathlib.Path,
     source_base: str | None = None,
+    allow_foreign_ids: bool = False,
 ) -> RepoEntry:
     """Build a :class:`RepoEntry` from a local bundle directory.
 
     Derives ``base_iri``/``title``/``publisher`` from the bundle's ``index.md``,
     computes a VoID planning index (triple + per-type counts), and harvests an
     ``id_index`` of explicit-``id`` IRIs that diverge from ``base_iri`` +
-    Concept ID (so they still route). Raises ``ValueError`` if the bundle has
-    no ``base_iri`` or a concept IRI falls outside it and is not indexable.
+    Concept ID (so they still route). ``path`` records the local directory only
+    when no ``source_base`` is given, since the directory then is the source.
+
+    Raises ``ValueError`` if the bundle has no ``base_iri``, or if an explicit
+    ``id`` lies outside ``base_iri`` and *allow_foreign_ids* is false: a bundle
+    must declare that it mints IRIs in a namespace it does not route by prefix
+    (SPEC §11.3 rule 3).
     """
     from lokf.model import load_bundle
 
@@ -239,12 +275,12 @@ def entry_for_bundle(
         if actual != base_iri + c.concept_id:  # explicit id diverges from the mint rule
             id_index[actual] = c.concept_id
 
-    # Ownership: every concept IRI must be routable (under base_iri or indexed).
-    for iri in bundle.by_iri():
-        if not iri.startswith(base_iri) and iri not in id_index:
-            raise ValueError(
-                f"concept IRI {iri} is outside base_iri {base_iri} and not indexable"
-            )
+    foreign = sorted(iri for iri in id_index if not iri.startswith(base_iri))
+    if foreign and not allow_foreign_ids:
+        raise ValueError(
+            f"{len(foreign)} explicit id(s) lie outside base_iri {base_iri}, "
+            f"first {foreign[0]}; allow foreign ids to index them"
+        )
 
     part = Counter(c.type for c in bundle.concepts)
     void = {"triples": len(bundle.graph()), "class_partition": dict(part)}
@@ -254,7 +290,108 @@ def entry_for_bundle(
         base_iri=base_iri,
         title=bundle.meta.get("title") or base_iri,
         source_base=source_base or root.as_uri(),
-        path=str(root),
+        path=None if source_base else str(root),
         void=void,
         id_index=id_index,
     )
+
+
+def is_url(source: str) -> bool:
+    """True when *source* names an archive to download rather than a local path."""
+    return source.startswith(("https://", "http://"))
+
+
+def _sha256(path: pathlib.Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return "sha256:" + h.hexdigest()
+
+
+def _download(url: str, dest: pathlib.Path) -> None:
+    """Stream *url* into *dest*, refusing more than :data:`MAX_ARCHIVE_BYTES`."""
+    with urllib.request.urlopen(url, timeout=60) as resp, dest.open("wb") as out:
+        total = 0
+        for chunk in iter(lambda: resp.read(1 << 20), b""):
+            total += len(chunk)
+            if total > MAX_ARCHIVE_BYTES:
+                raise ValueError(f"{url} is larger than {MAX_ARCHIVE_BYTES} bytes")
+            out.write(chunk)
+
+
+def _unpack(archive: pathlib.Path, dest: pathlib.Path) -> pathlib.Path:
+    """Unpack a bundle zip into *dest* and return the bundle's root directory.
+
+    The root is *dest* itself when the zip carries ``index.md`` at its top, or
+    the one top-level directory that does (a KTL release zip's ``knowledge/``).
+    Members with absolute or ``..`` paths, and zips that unpack to more than
+    :data:`MAX_ARCHIVE_BYTES`, are refused before anything is written.
+    """
+    if not zipfile.is_zipfile(archive):
+        raise ValueError(f"{archive.name} is not a zip archive")
+    dest.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(archive) as zf:
+        infos = zf.infolist()
+        for info in infos:
+            parts = pathlib.PurePosixPath(info.filename).parts
+            if info.filename.startswith(("/", "\\")) or ".." in parts:
+                raise ValueError(f"{archive.name}: unsafe member path {info.filename!r}")
+        if sum(i.file_size for i in infos) > MAX_ARCHIVE_BYTES:
+            raise ValueError(f"{archive.name} unpacks to more than {MAX_ARCHIVE_BYTES} bytes")
+        zf.extractall(dest)
+    if (dest / "index.md").is_file():
+        return dest
+    roots = [d for d in dest.iterdir() if d.is_dir() and (d / "index.md").is_file()]
+    if len(roots) != 1:
+        raise ValueError(
+            f"{archive.name}: expected index.md at the top or in one top-level "
+            f"directory, found {len(roots)}"
+        )
+    return roots[0]
+
+
+def entry_for_archive(
+    source: str | pathlib.Path,
+    source_base: str | None = None,
+    checksum: str | None = None,
+    allow_foreign_ids: bool = False,
+) -> RepoEntry:
+    """Build a :class:`RepoEntry` from a released bundle zip, local or at a URL.
+
+    The zip is unpacked to a temporary directory and registered from there, so
+    the entry never records a ``path``. Its digest goes in ``checksum``; when
+    *checksum* is given (``sha256:<hex>`` or bare hex) a mismatch is refused.
+    A URL is recorded as ``distribution.archive``; a local zip's location is
+    not, since it is rarely where a reader would find it. Without
+    *source_base* the entry has no source URL, as an unpacked copy is gone.
+    """
+    expected = None
+    if checksum:
+        m = _CHECKSUM.match(checksum.strip())
+        if not m:
+            raise ValueError(f"checksum must be sha256:<64 hex digits>, got {checksum!r}")
+        expected = "sha256:" + m.group(1).lower()
+
+    tmp = pathlib.Path(tempfile.mkdtemp(prefix="lokf-registry-"))
+    try:
+        if is_url(str(source)):
+            archive = tmp / "bundle.zip"
+            _download(str(source), archive)
+        else:
+            archive = pathlib.Path(source)
+        digest = _sha256(archive)
+        if expected and digest != expected:
+            raise ValueError(f"checksum mismatch: expected {expected}, got {digest}")
+        root = _unpack(archive, tmp / "unpacked")
+        entry = entry_for_bundle(
+            root, source_base=source_base, allow_foreign_ids=allow_foreign_ids
+        )
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    entry.path = None
+    entry.source_base = source_base or ""
+    entry.checksum = digest
+    if is_url(str(source)):
+        entry.distribution = {"archive": str(source)}
+    return entry

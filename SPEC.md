@@ -716,6 +716,8 @@ repos:
     distribution:
       rdf:      https://acme.example/knowledge/graph.nt        # SPARQL harvest source
       concepts: https://acme.example/knowledge/concepts.jsonld # offline document access
+      archive:  https://acme.example/releases/knowledge-v1.zip # the release it was registered from
+    checksum: sha256:…                               # digest of that archive
     void: { triples: 153, class_partition: { Metric: 1, Dataset: 1, GlossaryTerm: 1, AttestedComputation: 1 } }
     id_index:                                        # explicit `id:` IRIs outside base_iri → Concept ID
       https://acme.example/legacy/wau: metrics/weekly-active-users
@@ -743,9 +745,11 @@ target is *already* a correct triple. Three rules keep it trustworthy:
    longer than, and may not capture, the packaged vocabulary namespace
    (`https://w3id.org/lokf/`), which is reserved for the built-in schema; and no
    two `base_iri`s may nest, so at most one prefixes any IRI.
-3. **Ownership validation.** At registration a member's sampled concept IRIs must
-   actually start with its declared `base_iri`, so a bundle cannot claim a
-   namespace it does not own.
+3. **Ownership validation.** At registration a member's concept IRIs must start
+   with its declared `base_iri`, so a bundle cannot claim a namespace it does not
+   own. An explicit `id` outside it is refused unless the registrant allows
+   foreign ids, and even then it may not lie in another member's `base_iri` or
+   the vocabulary namespace.
 
 An IRI owned by no entry is returned as a tolerated **dangling link**, not an
 error — preserving OKF's permissive stance on broken cross-references.
