@@ -97,10 +97,12 @@ class Registry:
     def _match(self, iri: str) -> tuple[RepoEntry | None, str | None, str | None]:
         """(entry, via, concept_id) for *iri*, or (None, None, None).
 
-        Longest-``base_iri``-prefix wins; an explicit-``id`` in an ``id_index``
-        is only a *fallback* for an IRI that no base_iri prefixes (SPEC §11
-        rule 1), so a stale index entry can never hijack an IRI a member owns by
-        prefix.
+        Longest-``base_iri``-prefix wins; another member's ``id_index`` is
+        only a *fallback* for an IRI that no base_iri prefixes (SPEC §11 rule
+        1), so a stale index entry can never hijack an IRI a member owns by
+        prefix. The owner's own ``id_index`` does name the concept, though: an
+        explicit ``id`` under its base_iri that differs from base_iri + Concept
+        ID would otherwise route to a document that does not exist.
         """
         best: RepoEntry | None = None
         for e in self.repos:
@@ -108,6 +110,8 @@ class Registry:
                 if best is None or len(e.base_iri) > len(best.base_iri):
                     best = e
         if best is not None:
+            if iri in best.id_index:
+                return best, "id_index", best.id_index[iri]
             return best, "prefix", iri[len(best.base_iri):].lstrip("/")
         for e in self.repos:
             if iri in e.id_index:

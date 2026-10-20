@@ -322,6 +322,18 @@ def test_prefix_beats_stale_id_index():
     assert res.entry.base_iri == "https://ex.org/kb/"
 
 
+def test_own_id_index_names_the_concept_under_base_iri(tmp_path):
+    """An explicit id under base_iri that differs from the file path routes to
+    the concept that declares it, not to a document named after the IRI."""
+    root = tmp_path / "kb"
+    _write_bundle(root, "https://ex.org/kb/", "legacy", "https://ex.org/kb/old/thing")
+    reg = Registry(path=pathlib.Path("x"))
+    reg.add(entry_for_bundle(root, source_base="https://src/"))
+    res = reg.resolve("https://ex.org/kb/old/thing")
+    assert res.via == "id_index" and res.concept_id == "legacy"
+    assert res.source_url == "https://src/legacy.md"
+
+
 def test_load_registry_tolerates_null_fields(tmp_path):
     """A hand-edited manifest with null id_index/void/repos doesn't crash lookups."""
     manifest = tmp_path / "r.yaml"

@@ -736,9 +736,11 @@ target is *already* a correct triple. Three rules keep it trustworthy:
 
 1. **Explicit-id index.** A concept's frontmatter `id:` may diverge from
    `base_iri + concept_id` (§5). Such IRIs are harvested into the entry's
-   `id_index` — a map from the explicit IRI to its Concept ID — and checked as
-   an exact-match fallback before an IRI is declared external, so they still
-   route (to the right source document).
+   `id_index` — a map from the explicit IRI to its Concept ID. The owning
+   member's own index is checked first, so an explicit `id` under its
+   `base_iri` names its concept; every member's index is then an exact-match
+   fallback before an IRI is declared external, so such IRIs still route (to
+   the right source document).
 2. **Boundaries, namespace precedence & non-nesting.** A member `base_iri` must
    end in a path separator (`/` or `#`) so prefix routing respects segment
    boundaries — `…/team/` never captures `…/team-archive/`. It must be strictly

@@ -27,6 +27,9 @@ with the 0.x caveat that a minor release may tighten validation.
 - Registration now refuses explicit ids outside `base_iri` unless
   `--allow-foreign-ids` is given, and ids inside another member's namespace.
 
+- An explicit `id` under a member's `base_iri` that differs from its file path
+  now resolves to the concept that declares it.
+
 - SHACL artifacts now match the authoring RDF projection, preserve separate
   Source/Citation shapes, and avoid false failures from inherited properties
   and fields sharing a predicate. Closed frontmatter checks remain in JSON Schema.
