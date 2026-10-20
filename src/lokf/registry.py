@@ -35,6 +35,9 @@ DEFAULT_REGISTRY = "lokf-registry.yaml"
 #: Ceiling on a bundle archive's size, downloaded and unpacked, so a hostile
 #: zip or an endless response cannot fill the disk.
 MAX_ARCHIVE_BYTES = 1 << 30
+#: Ceiling on a bundle archive's entry count: a zip of empty files costs no
+#: bytes but one inode, and time, apiece.
+MAX_ARCHIVE_ENTRIES = 100_000
 _CHECKSUM = re.compile(r"^(?:sha256:)?([0-9a-fA-F]{64})$")
 
 
@@ -333,13 +336,18 @@ def _unpack(archive: pathlib.Path, dest: pathlib.Path) -> pathlib.Path:
     The root is *dest* itself when the zip carries ``index.md`` at its top, or
     the one top-level directory that does (a KTL release zip's ``knowledge/``).
     Members with absolute or ``..`` paths, and zips that unpack to more than
-    :data:`MAX_ARCHIVE_BYTES`, are refused before anything is written.
+    :data:`MAX_ARCHIVE_BYTES` or hold more than :data:`MAX_ARCHIVE_ENTRIES`
+    entries, are refused before anything is written.
     """
     if not zipfile.is_zipfile(archive):
         raise ValueError(f"{archive.name} is not a zip archive")
     dest.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(archive) as zf:
         infos = zf.infolist()
+        if len(infos) > MAX_ARCHIVE_ENTRIES:
+            raise ValueError(
+                f"{archive.name} holds {len(infos)} entries, more than {MAX_ARCHIVE_ENTRIES}"
+            )
         for info in infos:
             parts = pathlib.PurePosixPath(info.filename).parts
             if info.filename.startswith(("/", "\\")) or ".." in parts:

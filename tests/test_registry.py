@@ -377,3 +377,9 @@ def test_load_registry_round_trips(tmp_path):
     # the on-disk form drops empty fields
     raw = yaml.safe_load(manifest.read_text())
     assert "id_index" not in raw["repos"][0]
+
+
+def test_entry_for_archive_refuses_too_many_entries(tmp_path, monkeypatch):
+    monkeypatch.setattr("lokf.registry.MAX_ARCHIVE_ENTRIES", 3)
+    with pytest.raises(ValueError, match="more than 3"):
+        entry_for_archive(_zip_bundle(tmp_path))
