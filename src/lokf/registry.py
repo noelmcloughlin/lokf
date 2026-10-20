@@ -176,14 +176,20 @@ class Registry:
         # An explicit id may lie outside its own base_iri (SPEC §11.3 rule 1),
         # but never inside another member's namespace or the vocabulary's, in
         # either order of registration: prefix routing would win and the index
-        # entry would never route, or it would claim a namespace it does not own.
+        # entry would never route, or it would claim a namespace it does not
+        # own. Nor may two members index one id: which of them it routes to
+        # would hang on the order they were registered in.
         for iri in entry.id_index:
-            if iri.startswith(VOCAB_NS):
+            if iri.startswith(VOCAB_NS) and not iri.startswith(b):
                 raise ValueError(f"explicit id {iri} lies in the vocabulary namespace")
             for e in self.repos:
                 if iri.startswith(e.base_iri):
                     raise ValueError(
                         f"explicit id {iri} lies in registered {e.base_iri!r}"
+                    )
+                if iri in e.id_index:
+                    raise ValueError(
+                        f"explicit id {iri} is already indexed by registered {e.base_iri!r}"
                     )
         for e in self.repos:
             for iri in e.id_index:

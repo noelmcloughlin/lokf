@@ -476,3 +476,19 @@ def test_load_registry_normalises_a_hand_written_checksum(tmp_path):
     manifest = tmp_path / "r.yaml"
     manifest.write_text("repos:\n- base_iri: https://a/\n  checksum: " + "AB" * 32 + "\n", encoding="utf-8")
     assert load_registry(manifest).repos[0].checksum == "sha256:" + "ab" * 32
+
+
+def test_add_refuses_an_id_two_members_index():
+    reg = Registry(path=pathlib.Path("x"))
+    reg.add(RepoEntry(base_iri="https://a.example/", id_index={"https://legacy.example/x": "x"}))
+    with pytest.raises(ValueError, match="already indexed by"):
+        reg.add(RepoEntry(base_iri="https://b.example/", id_index={"https://legacy.example/x": "y"}))
+
+
+def test_an_id_in_the_entrys_own_namespace_under_the_vocabulary_is_allowed():
+    reg = Registry(path=pathlib.Path("x"))
+    own = VOCAB_NS + "examples/"
+    reg.add(RepoEntry(base_iri=own, id_index={own + "old/x": "x"}))
+    assert len(reg.repos) == 1
+    with pytest.raises(ValueError, match="vocabulary namespace"):
+        reg.add(RepoEntry(base_iri="https://b.example/", id_index={VOCAB_NS + "Metric": "m"}))
