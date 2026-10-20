@@ -383,3 +383,75 @@ def test_entry_for_archive_refuses_too_many_entries(tmp_path, monkeypatch):
     monkeypatch.setattr("lokf.registry.MAX_ARCHIVE_ENTRIES", 3)
     with pytest.raises(ValueError, match="more than 3"):
         entry_for_archive(_zip_bundle(tmp_path))
+
+
+# -- downloads and unpacking ---------------------------------------------------
+@pytest.fixture
+def http_files(tmp_path):
+    """A local HTTP server over tmp_path/www; yields its base URL."""
+    import functools
+    import http.server
+    import threading
+
+    www = tmp_path / "www"
+    www.mkdir()
+    handler = functools.partial(http.server.SimpleHTTPRequestHandler, directory=str(www))
+    handler.log_message = lambda *a: None
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    yield f"http://127.0.0.1:{srv.server_address[1]}", www
+    srv.shutdown()
+
+
+def test_entry_for_archive_downloads_for_real(tmp_path, http_files):
+    base, www = http_files
+    archive = _zip_bundle(tmp_path)
+    shutil.copy(archive, www / "k.zip")
+    entry = entry_for_archive(f"{base}/k.zip")
+    assert entry.checksum == _digest(archive) and entry.distribution == {"archive": f"{base}/k.zip"}
+    with pytest.raises(OSError):
+        entry_for_archive(f"{base}/missing.zip")
+
+
+def test_download_over_the_cap_leaves_no_file(tmp_path, http_files, monkeypatch):
+    from lokf.registry import _download
+
+    base, www = http_files
+    (www / "big.zip").write_bytes(b"x" * 4096)
+    dest = tmp_path / "out.zip"
+    with pytest.raises(ValueError, match="larger than 1024"):
+        _download(f"{base}/big.zip", dest, max_bytes=1024)
+    assert not dest.exists()
+
+
+def test_redirects_refuse_downgrades_and_the_local_network():
+    import urllib.error
+    import urllib.request
+
+    from lokf.registry import _Redirects
+
+    req = urllib.request.Request("https://releases.example/k.zip")
+    with pytest.raises(urllib.error.URLError, match="refused redirect from"):
+        _Redirects(local_ok=False).redirect_request(req, None, 302, "Found", {}, "http://cdn.example/k.zip")
+    with pytest.raises(urllib.error.URLError, match="local network"):
+        _Redirects(local_ok=False).redirect_request(req, None, 302, "Found", {}, "https://127.0.0.1/admin")
+    with pytest.raises(urllib.error.URLError):
+        _Redirects(local_ok=True).redirect_request(req, None, 302, "Found", {}, "file:///etc/passwd")
+
+
+def test_a_corrupt_zip_is_a_clean_error(tmp_path):
+    archive = _zip_bundle(tmp_path)
+    data = bytearray(archive.read_bytes())
+    i = data.index(b"base_iri")  # inside index.md's stored bytes
+    data[i:i + 8] = b"BASE_IRI"  # same length, wrong CRC
+    archive.write_bytes(bytes(data))
+    with pytest.raises(ValueError, match="cannot be unpacked"):
+        entry_for_archive(archive)
+
+
+def test_an_absolute_member_path_is_refused(tmp_path):
+    archive = tmp_path / "abs.zip"
+    with zipfile.ZipFile(archive, "w") as zf:
+        zf.writestr("/etc/evil.md", "x")
+    with pytest.raises(ValueError, match="unsafe member"):
+        entry_for_archive(archive)

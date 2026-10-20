@@ -16,12 +16,19 @@ from __future__ import annotations
 
 import dataclasses
 import hashlib
+import http.client
+import ipaddress
 import pathlib
 import re
 import shutil
+import socket
 import tempfile
+import time
+import urllib.error
+import urllib.parse
 import urllib.request
 import zipfile
+import zlib
 from collections import Counter
 from dataclasses import dataclass, field
 
@@ -38,6 +45,8 @@ MAX_ARCHIVE_BYTES = 1 << 30
 #: Ceiling on a bundle archive's entry count: a zip of empty files costs no
 #: bytes but one inode, and time, apiece.
 MAX_ARCHIVE_ENTRIES = 100_000
+#: The longest a download may take in all; each read has its own shorter timeout.
+DOWNLOAD_SECONDS = 600
 _CHECKSUM = re.compile(r"^(?:sha256:)?([0-9a-fA-F]{64})$")
 
 
@@ -308,7 +317,54 @@ def entry_for_bundle(
 
 def is_url(source: str) -> bool:
     """True when *source* names an archive to download rather than a local path."""
-    return source.startswith(("https://", "http://"))
+    return source[:8].lower().startswith(("https://", "http://"))
+
+
+def _is_local_host(host: str | None) -> bool:
+    """True when *host* resolves to a loopback, private, link-local or
+    otherwise non-public address."""
+    if not host:
+        return False
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except OSError:
+        return False  # unresolvable: the request fails on its own
+    for info in infos:
+        ip = ipaddress.ip_address(str(info[4][0]).split("%", 1)[0])
+        if not ip.is_global:
+            return True
+    return False
+
+
+class _Redirects(urllib.request.HTTPRedirectHandler):
+    """Follow a redirect only to http(s), never from https down to http, and
+    never into the local network unless the first URL pointed there: a
+    release URL may move to a CDN, not to a service beside the registrant."""
+
+    def __init__(self, local_ok: bool):
+        self.local_ok = local_ok
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        old, new = urllib.parse.urlsplit(req.full_url), urllib.parse.urlsplit(newurl)
+        if new.scheme not in ("http", "https") or (old.scheme == "https" and new.scheme == "http"):
+            raise urllib.error.URLError(f"refused redirect from {req.full_url} to {newurl}")
+        if not self.local_ok and _is_local_host(new.hostname):
+            raise urllib.error.URLError(f"refused redirect into the local network: {newurl}")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def open_url(url: str, timeout: float = 60):
+    """Open an http(s) *url*, following only the redirects :class:`_Redirects`
+    allows. Raises ``OSError`` for anything that goes wrong on the wire and
+    ``ValueError`` for a URL that is not http(s)."""
+    first = urllib.parse.urlsplit(url)
+    if first.scheme.lower() not in ("http", "https"):
+        raise ValueError(f"not an http(s) URL: {url}")
+    opener = urllib.request.build_opener(_Redirects(local_ok=_is_local_host(first.hostname)))
+    try:
+        return opener.open(url, timeout=timeout)
+    except http.client.HTTPException as exc:  # InvalidURL and friends are not OSErrors
+        raise OSError(f"{url}: {exc}") from exc
 
 
 def _sha256(path: pathlib.Path) -> str:
@@ -319,48 +375,66 @@ def _sha256(path: pathlib.Path) -> str:
     return "sha256:" + h.hexdigest()
 
 
-def _download(url: str, dest: pathlib.Path) -> None:
-    """Stream *url* into *dest*, refusing more than :data:`MAX_ARCHIVE_BYTES`."""
-    with urllib.request.urlopen(url, timeout=60) as resp, dest.open("wb") as out:
-        total = 0
-        for chunk in iter(lambda: resp.read(1 << 20), b""):
-            total += len(chunk)
-            if total > MAX_ARCHIVE_BYTES:
-                raise ValueError(f"{url} is larger than {MAX_ARCHIVE_BYTES} bytes")
-            out.write(chunk)
+def _download(url: str, dest: pathlib.Path, max_bytes: int = MAX_ARCHIVE_BYTES) -> None:
+    """Stream *url* into *dest*, refusing more than *max_bytes* or a transfer
+    longer than :data:`DOWNLOAD_SECONDS`. A failed download leaves no file."""
+    deadline = time.monotonic() + DOWNLOAD_SECONDS
+    try:
+        with open_url(url) as resp, dest.open("wb") as out:
+            total = 0
+            for chunk in iter(lambda: resp.read(1 << 20), b""):
+                total += len(chunk)
+                if total > max_bytes:
+                    raise ValueError(f"{url} is larger than {max_bytes} bytes")
+                if time.monotonic() > deadline:
+                    raise OSError(f"{url} took longer than {DOWNLOAD_SECONDS} seconds")
+                out.write(chunk)
+    except http.client.HTTPException as exc:  # a truncated chunked response
+        dest.unlink(missing_ok=True)
+        raise OSError(f"{url}: {exc}") from exc
+    except BaseException:
+        dest.unlink(missing_ok=True)
+        raise
 
 
-def _unpack(archive: pathlib.Path, dest: pathlib.Path) -> pathlib.Path:
+def _unpack(archive: pathlib.Path, dest: pathlib.Path, label: str | None = None) -> pathlib.Path:
     """Unpack a bundle zip into *dest* and return the bundle's root directory.
 
     The root is *dest* itself when the zip carries ``index.md`` at its top, or
     the one top-level directory that does (a KTL release zip's ``knowledge/``).
     Members with absolute or ``..`` paths, and zips that unpack to more than
     :data:`MAX_ARCHIVE_BYTES` or hold more than :data:`MAX_ARCHIVE_ENTRIES`
-    entries, are refused before anything is written.
+    entries, are refused before anything is written. *label* names the
+    archive in errors (its URL, say, rather than a temporary file); a zip
+    that is corrupt, encrypted or compressed in a way zipfile cannot read is
+    a ``ValueError`` too.
     """
+    name = label or archive.name
     if not zipfile.is_zipfile(archive):
-        raise ValueError(f"{archive.name} is not a zip archive")
+        raise ValueError(f"{name} is not a zip archive")
     dest.mkdir(parents=True, exist_ok=True)
-    with zipfile.ZipFile(archive) as zf:
-        infos = zf.infolist()
-        if len(infos) > MAX_ARCHIVE_ENTRIES:
-            raise ValueError(
-                f"{archive.name} holds {len(infos)} entries, more than {MAX_ARCHIVE_ENTRIES}"
-            )
-        for info in infos:
-            parts = pathlib.PurePosixPath(info.filename).parts
-            if info.filename.startswith(("/", "\\")) or ".." in parts:
-                raise ValueError(f"{archive.name}: unsafe member path {info.filename!r}")
-        if sum(i.file_size for i in infos) > MAX_ARCHIVE_BYTES:
-            raise ValueError(f"{archive.name} unpacks to more than {MAX_ARCHIVE_BYTES} bytes")
-        zf.extractall(dest)
+    try:
+        with zipfile.ZipFile(archive) as zf:
+            infos = zf.infolist()
+            if len(infos) > MAX_ARCHIVE_ENTRIES:
+                raise ValueError(
+                    f"{name} holds {len(infos)} entries, more than {MAX_ARCHIVE_ENTRIES}"
+                )
+            for info in infos:
+                parts = pathlib.PurePosixPath(info.filename).parts
+                if info.filename.startswith(("/", "\\")) or ".." in parts:
+                    raise ValueError(f"{name}: unsafe member path {info.filename!r}")
+            if sum(i.file_size for i in infos) > MAX_ARCHIVE_BYTES:
+                raise ValueError(f"{name} unpacks to more than {MAX_ARCHIVE_BYTES} bytes")
+            zf.extractall(dest)
+    except (zipfile.BadZipFile, zlib.error, RuntimeError, NotImplementedError, EOFError) as exc:
+        raise ValueError(f"{name} cannot be unpacked: {exc}") from exc
     if (dest / "index.md").is_file():
         return dest
     roots = [d for d in dest.iterdir() if d.is_dir() and (d / "index.md").is_file()]
     if len(roots) != 1:
         raise ValueError(
-            f"{archive.name}: expected index.md at the top or in one top-level "
+            f"{name}: expected index.md at the top or in one top-level "
             f"directory, found {len(roots)}"
         )
     return roots[0]
