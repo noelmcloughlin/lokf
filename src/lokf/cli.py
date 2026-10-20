@@ -914,6 +914,20 @@ def registry_init(
     typer.echo(f"wrote {registry}")
 
 
+def _manifest(registry: Path):
+    """Load *registry*, or exit cleanly when it is missing or malformed."""
+    from lokf.registry import load_registry
+
+    if not registry.exists():
+        _err(f"{registry} not found — run `lokf registry init` first")
+        raise typer.Exit(1)
+    try:
+        return load_registry(registry)
+    except (ValueError, OSError) as exc:
+        _err(f"cannot read the registry: {exc}")
+        raise typer.Exit(1)
+
+
 @registry_app.command("add")
 def registry_add(
     source: str = typer.Argument(
@@ -941,11 +955,9 @@ def registry_add(
     ),
 ) -> None:
     """Register a bundle: derive its base_iri, VoID index, and id_index."""
-    from lokf.registry import entry_for_archive, entry_for_bundle, is_url, load_registry
+    from lokf.registry import entry_for_archive, entry_for_bundle, is_url
 
-    if not registry.exists():
-        _err(f"{registry} not found — run `lokf registry init` first")
-        raise typer.Exit(1)
+    reg = _manifest(registry)
     local = Path(source)
     if not is_url(source) and not local.exists():
         _err(f"{source} not found")
@@ -953,7 +965,6 @@ def registry_add(
     if checksum and local.is_dir():
         _err("--checksum applies to a zip, not a directory")
         raise typer.Exit(1)
-    reg = load_registry(registry)
     try:
         if local.is_dir():
             entry = entry_for_bundle(
@@ -986,12 +997,7 @@ def registry_list(
     ),
 ) -> None:
     """Print the routing table: base_iri, title, triples, status."""
-    from lokf.registry import load_registry
-
-    if not registry.exists():
-        _err(f"{registry} not found — run `lokf registry init` first")
-        raise typer.Exit(1)
-    reg = load_registry(registry)
+    reg = _manifest(registry)
     if not reg.repos:
         typer.echo("(no members registered)")
         return
@@ -1012,12 +1018,7 @@ def registry_resolve(
     Exits non-zero for an IRI no member owns — a tolerated dangling cross-link,
     not owned here.
     """
-    from lokf.registry import load_registry
-
-    if not registry.exists():
-        _err(f"{registry} not found — run `lokf registry init` first")
-        raise typer.Exit(1)
-    res = load_registry(registry).resolve(iri)
+    res = _manifest(registry).resolve(iri)
     if res.external:
         typer.echo(f"{iri}\n  external: not owned by any registered bundle")
         raise typer.Exit(1)

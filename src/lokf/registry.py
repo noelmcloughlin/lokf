@@ -228,7 +228,10 @@ def load_registry(path: str | pathlib.Path) -> Registry:
     fall back to defaults rather than crashing a later lookup.
     """
     p = pathlib.Path(path)
-    data = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
+    try:
+        data = yaml.safe_load(p.read_text(encoding="utf-8")) or {}
+    except yaml.YAMLError as exc:
+        raise ValueError(f"{p}: not valid YAML: {exc}") from None
     if not isinstance(data, dict):
         raise ValueError(f"{p}: registry must be a YAML mapping, got {type(data).__name__}")
     entries = data.get("repos") or []

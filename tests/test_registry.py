@@ -272,6 +272,16 @@ def test_cli_list_missing_manifest_is_clean_error(tmp_path):
     assert r.exit_code == 1 and "not found" in r.output
 
 
+@pytest.mark.parametrize("text", ["repos: [\n", "- a list\n"])
+def test_cli_reports_a_malformed_manifest_cleanly(tmp_path, text):
+    manifest = tmp_path / "lokf-registry.yaml"
+    manifest.write_text(text, encoding="utf-8")
+    for args in (["list"], ["resolve", "https://x/"], ["add", str(BUNDLE)]):
+        r = runner.invoke(app, ["registry", *args, "-r", str(manifest)])
+        assert r.exit_code == 1 and "cannot read the registry" in r.output, args
+        assert r.exception is None or isinstance(r.exception, SystemExit), args
+
+
 def test_cli_init_creates_parent_dirs(tmp_path):
     manifest = tmp_path / "nested" / "dir" / "lokf-registry.yaml"
     assert runner.invoke(app, ["registry", "init", "-r", str(manifest)]).exit_code == 0
