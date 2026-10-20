@@ -455,3 +455,24 @@ def test_an_absolute_member_path_is_refused(tmp_path):
         zf.writestr("/etc/evil.md", "x")
     with pytest.raises(ValueError, match="unsafe member"):
         entry_for_archive(archive)
+
+
+@pytest.mark.parametrize("entry,message", [
+    ("- base_iri: [https://a/]\n", "has no base_iri"),
+    ("- title: no base\n", "has no base_iri"),
+    ("- just a string\n", "must be a mapping"),
+    ("- base_iri: https://a/\n  distribution: https://a/graph.nt\n", "distribution must be a dict"),
+    ("- base_iri: https://a/\n  title: [a, b]\n", "title must be a str"),
+    ("- base_iri: https://a/\n  checksum: md5:abc\n", "checksum must be"),
+])
+def test_load_registry_names_a_malformed_entry(tmp_path, entry, message):
+    manifest = tmp_path / "r.yaml"
+    manifest.write_text("repos:\n" + entry, encoding="utf-8")
+    with pytest.raises(ValueError, match=f"repos\\\\[0\\\\].*{message}|{message}"):
+        load_registry(manifest)
+
+
+def test_load_registry_normalises_a_hand_written_checksum(tmp_path):
+    manifest = tmp_path / "r.yaml"
+    manifest.write_text("repos:\n- base_iri: https://a/\n  checksum: " + "AB" * 32 + "\n", encoding="utf-8")
+    assert load_registry(manifest).repos[0].checksum == "sha256:" + "ab" * 32

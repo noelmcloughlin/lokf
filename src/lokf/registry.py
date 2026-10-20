@@ -233,11 +233,34 @@ def _entry_dict(entry: RepoEntry) -> dict:
     return out
 
 
+def _entry_from(raw, where: str) -> RepoEntry:
+    """A :class:`RepoEntry` from one manifest entry, checked field by field."""
+    if not isinstance(raw, dict):
+        raise ValueError(f"{where} must be a mapping, got {type(raw).__name__}")
+    fields = {k: v for k, v in raw.items() if k in _ENTRY_FIELDS and v is not None}
+    if not isinstance(fields.get("base_iri"), str) or not fields["base_iri"]:
+        raise ValueError(f"{where} has no base_iri")
+    for name, value in fields.items():
+        kind = dict if isinstance(_ENTRY_DEFAULTS[name], dict) else str
+        if not isinstance(value, kind):
+            raise ValueError(f"{where}: {name} must be a {kind.__name__}, got {type(value).__name__}")
+    if "checksum" in fields:
+        m = _CHECKSUM.match(fields["checksum"].strip())
+        if not m:
+            raise ValueError(f"{where}: checksum must be sha256:<64 hex digits>")
+        fields["checksum"] = "sha256:" + m.group(1).lower()
+    return RepoEntry(**fields)
+
+
 def load_registry(path: str | pathlib.Path) -> Registry:
     """Load ``lokf-registry.yaml`` with a plain YAML reader (no LinkML).
 
     Tolerant of a hand-edited manifest: a null ``repos:`` or null field values
-    fall back to defaults rather than crashing a later lookup.
+    fall back to defaults rather than crashing a later lookup. A field of the
+    wrong kind (a list where a string belongs, an entry without a
+    ``base_iri``) is a ``ValueError`` naming the entry, and a checksum is
+    normalised to ``sha256:`` and lowercase hex, so a hand-written one compares
+    equal to the digest the toolkit computes.
     """
     p = pathlib.Path(path)
     try:
@@ -249,10 +272,7 @@ def load_registry(path: str | pathlib.Path) -> Registry:
     entries = data.get("repos") or []
     if not isinstance(entries, list):
         raise ValueError(f"{p}: 'repos' must be a list")
-    repos = [
-        RepoEntry(**{k: v for k, v in (r or {}).items() if k in _ENTRY_FIELDS and v is not None})
-        for r in entries
-    ]
+    repos = [_entry_from(r, f"{p}: repos[{i}]") for i, r in enumerate(entries)]
     return Registry(
         path=p,
         id=data.get("id") or "",
