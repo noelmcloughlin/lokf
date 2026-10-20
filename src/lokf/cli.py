@@ -914,6 +914,13 @@ def registry_init(
     typer.echo(f"wrote {registry}")
 
 
+def _beside(registry: Path, location: str) -> str:
+    """*location*, a local path, relative to the manifest's directory."""
+    import os
+
+    return Path(os.path.relpath(Path(location).resolve(), registry.resolve().parent)).as_posix()
+
+
 def _manifest(registry: Path):
     """Load *registry*, or exit cleanly when it is missing or malformed."""
     from lokf.registry import load_registry
@@ -940,13 +947,18 @@ def registry_add(
     source_base: Optional[str] = typer.Option(
         None,
         "--source-base",
-        help="URL prefix for source .md files. Without it a directory is recorded "
-        "by its local path, and a zip has no source URL.",
+        help="URL prefix for source .md files. Without it a directory's files are "
+        "found through its path, and a zip's have no URL.",
     ),
     checksum: Optional[str] = typer.Option(
         None,
         "--checksum",
         help="Expected sha256 of a zip (sha256:<hex> or bare hex); a mismatch is refused.",
+    ),
+    archive_url: Optional[str] = typer.Option(
+        None,
+        "--archive-url",
+        help="Where a local zip is published, recorded in place of its local path.",
     ),
     allow_foreign_ids: bool = typer.Option(
         False,
@@ -962,8 +974,8 @@ def registry_add(
     if not is_url(source) and not local.exists():
         _err(f"{source} not found")
         raise typer.Exit(1)
-    if checksum and local.is_dir():
-        _err("--checksum applies to a zip, not a directory")
+    if (checksum or archive_url) and local.is_dir():
+        _err("--checksum and --archive-url apply to a zip, not a directory")
         raise typer.Exit(1)
     try:
         if local.is_dir():
@@ -976,7 +988,15 @@ def registry_add(
                 source_base=source_base,
                 checksum=checksum,
                 allow_foreign_ids=allow_foreign_ids,
+                archive_url=archive_url,
             )
+        # Local locations are written relative to the manifest, so a manifest
+        # built on a CI runner reads the same in a checkout anywhere else.
+        if entry.path:
+            entry.path = _beside(registry, entry.path)
+        archive = entry.distribution.get("archive")
+        if archive and not is_url(archive):
+            entry.distribution["archive"] = _beside(registry, archive)
         reg.add(entry)
     except (ValueError, OSError) as exc:
         _err(f"cannot register {source}: {exc}")

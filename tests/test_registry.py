@@ -7,6 +7,7 @@ bundle, and the ``lokf registry`` CLI round-trip.
 from __future__ import annotations
 
 import hashlib
+import os
 import pathlib
 import shutil
 import zipfile
@@ -133,9 +134,36 @@ def test_entry_for_bundle_refuses_foreign_id_by_default(tmp_path):
         entry_for_bundle(root)
 
 
-def test_entry_for_bundle_writes_path_only_without_source_base(tmp_path):
-    assert entry_for_bundle(BUNDLE, source_base="https://x/").path is None
+def test_entry_for_bundle_records_the_absolute_path(tmp_path):
+    """A directory stays loadable with or without --source-base."""
+    assert entry_for_bundle(BUNDLE, source_base="https://x/").path == str(BUNDLE)
     assert entry_for_bundle(BUNDLE).path == str(BUNDLE)
+
+
+def test_cli_add_writes_local_locations_relative_to_the_manifest(tmp_path):
+    """A manifest built on a CI runner reads the same in any checkout."""
+    archive = _zip_bundle(tmp_path)
+
+    def added(*args) -> dict:
+        manifest = tmp_path / "fed" / f"r{len(list(tmp_path.glob('fed/*.yaml')))}.yaml"
+        runner.invoke(app, ["registry", "init", "-r", str(manifest)])
+        r = runner.invoke(app, ["registry", "add", *args, "-r", str(manifest)])
+        assert r.exit_code == 0, r.output
+        return yaml.safe_load(manifest.read_text())["repos"][0]
+
+    raw = added(str(BUNDLE), "--source-base", "https://x/")
+    assert raw["path"] == pathlib.Path(os.path.relpath(BUNDLE, tmp_path / "fed")).as_posix()
+    assert added(str(archive))["distribution"] == {"archive": "../knowledge-v1.zip"}
+    url = "https://releases.example/knowledge-v1.zip"
+    raw = added(str(archive), "--archive-url", url)
+    assert raw["distribution"] == {"archive": url} and "path" not in raw
+
+
+def test_cli_add_refuses_archive_url_for_a_directory(tmp_path):
+    manifest = tmp_path / "lokf-registry.yaml"
+    runner.invoke(app, ["registry", "init", "-r", str(manifest)])
+    r = runner.invoke(app, ["registry", "add", str(BUNDLE), "--archive-url", "https://x/k.zip", "-r", str(manifest)])
+    assert r.exit_code == 1 and "apply to a zip" in r.output
 
 
 def test_add_refuses_id_in_another_members_namespace():
@@ -175,7 +203,7 @@ def test_entry_for_archive_unpacks_and_records_checksum(tmp_path, top):
     assert entry.void["triples"] == 153
     assert entry.checksum == _digest(archive)
     assert entry.path is None and entry.source_base == "https://x/"
-    assert entry.distribution == {}
+    assert entry.distribution == {"archive": str(archive.resolve())}
 
 
 def test_entry_for_archive_without_source_base_has_no_runner_path(tmp_path):

@@ -83,15 +83,26 @@ class Resolution:
         return self.entry is None
 
 
-def _source_url(entry: RepoEntry, concept_id: str | None) -> str | None:
-    """A concept's source-markdown URL: ``source_base``/``concept_id``.md.
+def _source_url(
+    entry: RepoEntry, concept_id: str | None, base: pathlib.Path | None = None
+) -> str | None:
+    """A concept's source-markdown URL: ``source_base``/``concept_id``.md, or
+    without a ``source_base`` the file under the entry's local ``path``, read
+    relative to *base* (the manifest's directory) when it is relative.
 
-    Returns ``None`` when the entry has no ``source_base`` or the IRI is the
-    bundle's namespace root (empty Concept ID) — neither names a document.
+    Returns ``None`` when the entry has neither, or the IRI is the bundle's
+    namespace root (empty Concept ID) — neither names a document.
     """
-    if not entry.source_base or not concept_id:
+    if not concept_id:
         return None
-    return entry.source_base.rstrip("/") + "/" + concept_id + ".md"
+    if entry.source_base:
+        return entry.source_base.rstrip("/") + "/" + concept_id + ".md"
+    if entry.path:
+        root = pathlib.Path(entry.path)
+        if not root.is_absolute() and base is not None:
+            root = base / root
+        return (root.resolve() / (concept_id + ".md")).as_uri()
+    return None
 
 
 @dataclass
@@ -141,7 +152,8 @@ class Registry:
             iri=iri,
             entry=entry,
             concept_id=concept_id,
-            source_url=_source_url(entry, concept_id) if entry else None,
+            source_url=_source_url(entry, concept_id, self.path.parent if self.path else None)
+            if entry else None,
             via=via,
         )
 
@@ -299,8 +311,8 @@ def entry_for_bundle(
     Derives ``base_iri``/``title``/``publisher`` from the bundle's ``index.md``,
     computes a VoID planning index (triple + per-type counts), and harvests an
     ``id_index`` of explicit-``id`` IRIs that diverge from ``base_iri`` +
-    Concept ID (so they still route). ``path`` records the local directory only
-    when no ``source_base`` is given, since the directory then is the source.
+    Concept ID (so they still route). ``path`` records the directory as an
+    absolute path; ``lokf registry add`` writes it relative to the manifest.
 
     Raises ``ValueError`` if the bundle has no ``base_iri``, or if an explicit
     ``id`` lies outside ``base_iri`` and *allow_foreign_ids* is false: a bundle
@@ -334,8 +346,8 @@ def entry_for_bundle(
     return RepoEntry(
         base_iri=base_iri,
         title=bundle.meta.get("title") or base_iri,
-        source_base=source_base or root.as_uri(),
-        path=None if source_base else str(root),
+        source_base=source_base or "",
+        path=str(root),
         void=void,
         id_index=id_index,
     )
@@ -471,16 +483,21 @@ def entry_for_archive(
     source_base: str | None = None,
     checksum: str | None = None,
     allow_foreign_ids: bool = False,
+    archive_url: str | None = None,
 ) -> RepoEntry:
     """Build a :class:`RepoEntry` from a released bundle zip, local or at a URL.
 
     The zip is unpacked to a temporary directory and registered from there, so
     the entry never records a ``path``. Its digest goes in ``checksum``; when
     *checksum* is given (``sha256:<hex>`` or bare hex) a mismatch is refused.
-    A URL is recorded as ``distribution.archive``; a local zip's location is
-    not, since it is rarely where a reader would find it. Without
+    ``distribution.archive`` records where the zip is published: *archive_url*
+    when given (a CI job registers the local copy of a zip it is about to
+    publish), else the URL it was read from, else its absolute local path,
+    which ``lokf registry add`` writes relative to the manifest. Without
     *source_base* the entry has no source URL, as an unpacked copy is gone.
     """
+    if archive_url is not None and not is_url(archive_url):
+        raise ValueError(f"archive_url must be an http(s) URL, got {archive_url!r}")
     expected = None
     if checksum:
         m = _CHECKSUM.match(checksum.strip())
@@ -498,7 +515,7 @@ def entry_for_archive(
         digest = _sha256(archive)
         if expected and digest != expected:
             raise ValueError(f"checksum mismatch: expected {expected}, got {digest}")
-        root = _unpack(archive, tmp / "unpacked")
+        root = _unpack(archive, tmp / "unpacked", label=str(source))
         entry = entry_for_bundle(
             root, source_base=source_base, allow_foreign_ids=allow_foreign_ids
         )
@@ -507,6 +524,6 @@ def entry_for_archive(
     entry.path = None
     entry.source_base = source_base or ""
     entry.checksum = digest
-    if is_url(str(source)):
-        entry.distribution = {"archive": str(source)}
+    where = str(source) if is_url(str(source)) else str(pathlib.Path(source).resolve())
+    entry.distribution = {"archive": archive_url or where}
     return entry

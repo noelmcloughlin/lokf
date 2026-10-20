@@ -22,7 +22,7 @@ with the 0.x caveat that a minor release may tighten validation.
   one-line ASK or CONSTRUCT is no longer run as a SELECT.
 
 - `lokf registry add` takes a bundle zip or its URL and records the archive and
-  its `checksum`; `path` is written only without `--source-base`.
+  its `checksum`; local locations are written relative to the manifest.
 
 - Registration now refuses explicit ids outside `base_iri` unless
   `--allow-foreign-ids` is given, and ids inside another member's namespace.

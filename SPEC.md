@@ -702,7 +702,9 @@ A registry is a git-committed `lokf-registry.yaml` — a `dcat:Catalog` of
 lightweight `void` planning index (triple and per-type counts, so an agent can
 pick a bundle *without* dereferencing it), and harvest `status`. It parses with a
 plain YAML reader — no LinkML on the read path — and round-trips to a crawlable
-`registry.jsonld`.
+`registry.jsonld`. A local location, the `path` of a checkout or a
+`distribution` value that is not a URL, is relative to the manifest, so a
+manifest written on one machine reads the same in a checkout anywhere else.
 
 ```yaml
 lokf_registry_version: "0.1"
